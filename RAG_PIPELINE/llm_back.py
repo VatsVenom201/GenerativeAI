@@ -51,7 +51,7 @@ embedding_model = HuggingFaceEmbeddings(
 # vector database
 
 from langchain_community.vectorstores import Chroma
-from langchain_community.vectorstores import FAISS
+
 vector_db = Chroma.from_documents( # defining a vector database
     documents=docs,                # documents to put in
     embedding=embedding_model,     # emb model to be used
