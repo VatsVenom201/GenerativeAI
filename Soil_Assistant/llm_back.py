@@ -23,7 +23,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 # pdf loader
 
 from langchain_community.document_loaders import PyPDFLoader
-pdf_paths = [  # these are demo docs
+pdf_paths = [
     "D:/PyCharm/GenAI/Chatbot/RAG-pipeline/Fundamental of Soil Sci by ISSS-1_Searchable.pdf",
 
 ]
@@ -34,11 +34,10 @@ for path in pdf_paths:
     loader = PyPDFLoader(path)
     docs.extend(loader.load())
 
-# text splitter
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=80)
 
 docs= text_splitter.split_documents(docs)
 
@@ -50,13 +49,32 @@ embedding_model = HuggingFaceEmbeddings(
 # vector database
 
 from langchain_community.vectorstores import Chroma
-from langchain_community.vectorstores import FAISS
+
 vector_db = Chroma.from_documents( # defining a vector database
     documents=docs,                # documents to put in
     embedding=embedding_model,     # emb model to be used
     persist_directory="vector_db"  # db storage directory
 )
-retriever = vector_db.as_retriever(search_kwargs={"k":6}) # returns top 6 chunks
+
+# RAG - Retrival
+retriever = vector_db.as_retriever(search_type='similarity',search_kwargs={"k":15}) # returns top 15 chunks
+
+# RERANKER - Reranks the retrieved chunks
+
+from sentence_transformers import CrossEncoder
+
+reranker = CrossEncoder("BAAI/bge-reranker-base")
+
+def rerank_documents(query, docs, top_n=3):
+    pairs = [(query, doc.page_content) for doc in docs]
+
+    scores = reranker.predict(pairs)
+
+    scored_docs = list(zip(docs, scores))
+
+    scored_docs.sort(key=lambda x: x[1], reverse=True)
+
+    return [doc for doc, score in scored_docs[:top_n]]
 
 
 # ----------------- 2️⃣ LOAD LOCAL MODEL (4GB VRAM Optimized) -----------------
@@ -120,22 +138,52 @@ pipe, tokenizer = load_local_llm()
 #
 #     return relevant_messages
 
+from sentence_transformers import CrossEncoder
+
+
+# removing duplicates from retrieved chunks---
+def remove_duplicate_docs(docs):
+    unique_docs = []
+    seen = set()
+
+    for doc in docs:
+        # use first 200 chars as fingerprint
+        fingerprint = doc.page_content.strip()[:200]
+
+        if fingerprint not in seen:
+            unique_docs.append(doc)
+            seen.add(fingerprint)
+
+    return unique_docs
 
 def response_llm(user_query, chat_history):
 
     # Retrieve relevant chunks
-    retrieved_docs = retriever.invoke(user_query)
 
+       #retrieved_docs = retriever.invoke(user_query)  #----without reranker*----
+
+    # Step 1: retrieve candidates
+    candidate_docs = retriever.invoke(user_query)
+
+    print(f"\nRetrieved chunks (before dedup): {len(candidate_docs)}")
+
+    # Step 2: remove duplicates
+    unique_docs = remove_duplicate_docs(candidate_docs)
+
+    print(f"Unique chunks after dedup: {len(unique_docs)}")
+
+    # Step 3: rerank unique docs
+    retrieved_docs = rerank_documents(user_query, unique_docs, top_n=5)
+
+    print(f"Chunks sent to reranker: {len(unique_docs)}")
     context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
-    history = [{"role": "system", "content": """You are answering questions using a textbook context.
-
-        Rules:
-        1. Use ONLY the information present in the context.
-        2. If the context does not contain enough information to answer the question, say: 'The provided context does not contain this information.'
-        3. Do NOT use outside knowledge.
-        4. Do NOT guess or add explanations."""
-                }]
+    history = [
+        {
+            "role": "system",
+            "content": "Use the context to answer the question. Extract the answer clearly. If the context does not contain the answer, say: Not found in context."
+        }
+    ]
 
     # *****full chat history code ******
     # for msg in chat_history:
